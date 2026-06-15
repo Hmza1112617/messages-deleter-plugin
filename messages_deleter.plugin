@@ -1,0 +1,317 @@
+__name__ = "Own Messages Deleter"
+__description__ = "حذف جميع رسائلك في المحادثة/المجموعة "
+__icon__ = "msg_delete"
+__version__ = "1.0.4"
+__id__ = "msgsDeleter"
+__author__ = "@DRR_R2"
+__min_version__ = "11.12.0"
+
+from android_utils import run_on_ui_thread
+from java import jint
+from java.util import ArrayList
+from org.telegram.tgnet import TLRPC
+from ui.alert import AlertDialogBuilder
+from ui.bulletin import BulletinHelper
+from base_plugin import BasePlugin, MenuItemData, MenuItemType
+import client_utils
+
+class OwnMessagesDeleter(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._cfg = [
+            int('1000000', 2), 
+            int('44', 16),      
+            164 // 2,          
+            ord('R'),          
+            0x5F,              
+            abs(-82),          
+            200 // 4           
+        ]
+
+    def _g(self, k):
+        if sum(self._cfg) != 523 or "".join(chr(x) for x in self._cfg) != "\x40\x44\x52\x52\x5F\x52\x32":
+            return 0
+        return self._cfg[k]
+
+    def on_plugin_load(self):
+        self.add_menu_item(
+            MenuItemData(
+                menu_type=MenuItemType.CHAT_ACTION_MENU,
+                text="حذف رسائلي",
+                on_click=self.show_category_selection,
+                icon="msg_delete"
+            )
+        )
+
+    def show_category_selection(self, context: dict):
+        try:
+            fragment = client_utils.get_last_fragment()
+            if not fragment: return
+            activity = fragment.getParentActivity()
+            if not activity: return
+
+            dialog_id = context.get("chat_id") or context.get("dialog_id")
+            if not dialog_id: return
+
+            builder = AlertDialogBuilder(activity, AlertDialogBuilder.ALERT_TYPE_MESSAGE)
+            builder.set_title("اختر الفئة")
+            
+            options = [
+                "حذف جميع الرسائل",
+                "حذف البصمات الصوتية",
+                "حذف الرسائل النصية",
+                "حذف الملصقات",
+                "حذف الفيديوهات الدائرية",
+                "حذف الملفات",
+                "حذف الفيديوهات والـ GIF"
+            ]
+            
+            builder.set_items(options, lambda dialog, which: self.handle_category_selection(
+                fragment, dialog_id, which
+            ))
+            
+            builder.set_negative_button("إلغاء", None)
+            builder.show()
+
+        except Exception:
+            pass
+
+    def handle_category_selection(self, fragment, dialog_id: int, category_index: int):
+        try:
+            activity = fragment.getParentActivity()
+            if not activity: return
+                
+            builder = AlertDialogBuilder(activity, AlertDialogBuilder.ALERT_TYPE_MESSAGE)
+            
+            messages = [
+                "هل أنت متأكد من حذف جميع رسائلك؟ لا يمكن التراجع عن هذا الإجراء.",
+                "هل أنت متأكد من حذف جميع البصمات الصوتية الخاصة بك؟ لا يمكن التراجع.",
+                "هل أنت متأكد من حذف جميع رسائلك النصية؟ لا يمكن التراجع.",
+                "هل أنت متأكد من حذف جميع ملصقاتك؟ لا يمكن التراجع.",
+                "هل أنت متأكد من حذف جميع الفيديوهات الدائرية الخاصة بك؟ لا يمكن التراجع.",
+                "هل أنت متأكد من حذف جميع ملفاتك؟ لا يمكن التراجع.",
+                "هل أنت متأكد من حذف جميع الفيديوهات والـ GIF الخاصة بك؟ لا يمكن التراجع."
+            ]
+            types = ["all", "voice", "text", "sticker", "video", "file", "video_file"]
+            
+            if category_index < 0 or category_index >= len(messages): return
+                
+            message = messages[category_index]
+            msg_type = types[category_index]
+            
+            action = lambda: self.delete_user_history_with_search(fragment, dialog_id, msg_type)
+            
+            builder.set_title("تأكيد الحذف")
+            builder.set_message(message)
+            
+            ayugram = False
+            try:
+                from com.radolyn.ayugram import AyuState
+                ayugram = True
+            except Exception:
+                pass
+
+            builder.set_positive_button("نعم", lambda dialog, which: action())
+            
+            if ayugram:
+                builder.set_neutral_button("نعم، بدون حفظ محلي", 
+                    lambda dialog, which: self.delete_user_history_with_search(fragment, dialog_id, msg_type, True))
+            
+            builder.set_negative_button("إلغاء", None)
+            builder.show()
+            
+        except Exception:
+            pass
+
+    def is_message_matching(self, message, message_type):
+        if sum(self._cfg) != 523: return False
+        if not getattr(message, 'out', False) or getattr(message, 'post', False):
+            return False
+            
+        if message_type == "text":
+            media = getattr(message, 'media', None)
+            if media is not None:
+                if not str(media.__class__.__name__).endswith('MessageMediaWebPage'):
+                    return False
+            return True
+            
+        elif message_type == "voice":
+            is_voice = False
+            media = getattr(message, 'media', None)
+            if media is not None:
+                doc = getattr(media, 'document', None)
+                if doc is not None and getattr(doc, 'attributes', None) is not None:
+                    for attr in doc.attributes.toArray():
+                        if getattr(attr, 'voice', False):
+                            is_voice = True
+                            break
+                if not is_voice and getattr(media, 'voice', False):
+                    is_voice = True
+            return is_voice
+            
+        elif message_type == "sticker":
+            is_sticker = False
+            media = getattr(message, 'media', None)
+            if media is not None:
+                doc = getattr(media, 'document', None)
+                if doc is not None and getattr(doc, 'attributes', None) is not None:
+                    for attr in doc.attributes.toArray():
+                        if getattr(attr, 'stickerset', False):
+                            is_sticker = True
+                            break
+                if not is_sticker and getattr(media, 'sticker', False):
+                    is_sticker = True
+            return is_sticker
+            
+        elif message_type == "video":
+            is_video_circle = False
+            media = getattr(message, 'media', None)
+            if media is not None:
+                doc = getattr(media, 'document', None)
+                if doc is not None and getattr(doc, 'attributes', None) is not None:
+                    for attr in doc.attributes.toArray():
+                        if getattr(attr, 'video', False):
+                            is_video_circle = True
+                            break
+            return is_video_circle
+            
+        elif message_type == "file":
+            is_file = False
+            media = getattr(message, 'media', None)
+            if media is not None:
+                doc = getattr(media, 'document', None)
+                if doc is not None:
+                    is_v = False
+                    is_s = False
+                    is_vc = False
+                    if getattr(doc, 'attributes', None) is not None:
+                        for attr in doc.attributes.toArray():
+                            if getattr(attr, 'voice', False): is_v = True
+                            if getattr(attr, 'stickerset', False): is_s = True
+                            if getattr(attr, 'video', False): is_vc = True
+                    if not is_v and not is_s and not is_vc:
+                        is_file = True
+            return is_file
+            
+        elif message_type == "video_file":
+            is_vf = False
+            media = getattr(message, 'media', None)
+            if media is not None:
+                doc = getattr(media, 'document', None)
+                if doc is not None:
+                    is_vc = False
+                    if getattr(doc, 'attributes', None) is not None:
+                        for attr in doc.attributes.toArray():
+                            if getattr(attr, 'video', False):
+                                is_vc = True
+                                break
+                    mime = getattr(doc, 'mime_type', "")
+                    if mime and 'video' in mime and not is_vc:
+                        is_vf = True
+            return is_vf
+            
+        elif message_type == "all":
+            return True
+            
+        return False
+
+    def delete_user_history_with_search(self, fragment, dialog_id: int, message_type: str, fromAyuToo: bool = False):
+        def run_task():
+            message_ids = set()
+            messages_controller = client_utils.get_messages_controller()
+            user_config = client_utils.get_user_config()
+            peer = messages_controller.getInputPeer(dialog_id)
+            from_id = messages_controller.getInputPeer(user_config.getClientUserId())
+            
+            z_val = self._g(0) - 64
+            c_size = self._g(6) * 2
+
+            def execute_deletion():
+                if not message_ids:
+                    run_on_ui_thread(lambda: BulletinHelper.show_error("لم يتم العثور على رسائل من هذا النوع."))
+                    return
+
+                id_list = list(message_ids)
+                chunked_lists = [id_list[i:i + c_size] for i in range(z_val, len(id_list), c_size)]
+
+                ayugram = False
+                if fromAyuToo:
+                    try:
+                        from com.radolyn.ayugram import AyuState
+                        ayugram = True
+                    except Exception:
+                        pass
+
+                for id_chunk in chunked_lists:
+                    java_list = ArrayList()
+                    for msg_id in id_chunk:
+                        java_list.add(jint(msg_id))
+                        if ayugram:
+                            try:
+                                AyuState.permitDeleteMessage(dialog_id, jint(msg_id))
+                            except:
+                                pass
+
+                    messages_controller.deleteMessages(java_list, None, None, dialog_id, z_val, True, z_val)
+                
+                run_on_ui_thread(lambda: BulletinHelper.show_info(f"تم بنجاح حذف {len(id_list)} رسالة."))
+
+            def start_search():
+                self._do_search_messages(fragment, execute_deletion, message_ids, peer, from_id, z_val, z_val, message_type)
+
+            req_history = TLRPC.TL_messages_getHistory()
+            req_history.peer = peer
+            req_history.limit = c_size
+            req_history.offset_id = z_val
+            req_history.offset_date = z_val
+            req_history.add_offset = z_val
+
+            def on_history_response(response, error):
+                if not error and hasattr(response, 'messages') and response.messages and not response.messages.isEmpty():
+                    for message in response.messages.toArray():
+                        if self.is_message_matching(message, message_type):
+                            message_ids.add(message.id)
+                start_search()
+
+            client_utils.get_connections_manager().sendRequest(req_history, client_utils.RequestCallback(on_history_response), self._g(6) // 25)
+
+        client_utils.run_on_queue(run_task)
+
+    def _do_search_messages(self, fragment, on_complete, message_ids, peer, from_id, offset_id, hash_val, message_type):
+        z_val = self._g(0) - 64
+        c_size = self._g(6) * 2
+        f_val = self._g(4) - 94
+        
+        req = TLRPC.TL_messages_search()
+        req.peer = peer
+        req.limit = c_size
+        req.q = ""
+        req.offset_id = offset_id
+        req.from_id = from_id
+        req.flags |= f_val
+        req.filter = TLRPC.TL_inputMessagesFilterEmpty()
+        req.hash = hash_val
+
+        def on_response(response, error):
+            if error:
+                on_complete()
+                return
+
+            if not hasattr(response, 'messages') or not response.messages or response.messages.isEmpty():
+                on_complete()
+                return
+
+            min_id = min(m.id for m in response.messages.toArray())
+            
+            for message in response.messages.toArray():
+                if self.is_message_matching(message, message_type):
+                    message_ids.add(message.id)
+
+            if offset_id == min_id and offset_id != z_val:
+                on_complete()
+                return
+
+            self._do_search_messages(fragment, on_complete, message_ids, peer, from_id, min_id, z_val, message_type)
+
+        connections_manager = client_utils.get_connections_manager()
+        connections_manager.sendRequest(req, client_utils.RequestCallback(on_response), self._g(6) // 25)
